@@ -1,1 +1,136 @@
-import osimport loggingimport asynciofrom io import BytesIOfrom dotenv import load_dotenvfrom PIL import Imagefrom aiogram import Bot, Dispatcher, types, Ffrom aiogram.filters import Commandfrom aiogram.types import FSInputFileimport torchfrom diffusers import StableDiffusionControlNetPipeline, ControlNetModelfrom controlnet_aux import CannyDetector# ——— Загрузка констант ———load_dotenv(".dev")TELEGRAM_TOKEN    = os.getenv("TELEGRAM_TOKEN")HF_TOKEN          = os.getenv("HUGGINGFACE_TOKEN", None)BASE_MODEL_ID     = os.getenv("BASE_MODEL_ID")CONTROLNET_ID     = os.getenv("CONTROLNET_MODEL_ID")DEVICE            = os.getenv("DEVICE", "cuda")COND_SCALE        = float(os.getenv("CONDITIONING_SCALE", 1.2))STRENGTH          = float(os.getenv("STRENGTH", 0.28))GUIDANCE_SCALE    = float(os.getenv("GUIDANCE_SCALE", 7.5))NUM_STEPS         = int(os.getenv("NUM_STEPS", 24))DEFAULT_PROMPT    = os.getenv("DEFAULT_PROMPT", "photorealistic, high quality")# ——— Логирование ———logging.basicConfig(level=logging.INFO)logger = logging.getLogger(__name__)# ——— Инициализация бота и диспетчера ———bot = Bot(token=TELEGRAM_TOKEN)dp  = Dispatcher()# ——— Загрузка пайплайна Stable Diffusion + ControlNet ———def init_pipeline():    token = HF_TOKEN or None    # Определяем устройство и dtype    device = DEVICE    if device == "cuda" and not torch.cuda.is_available():        device = "cpu"    if device == "mps" and not getattr(torch.backends, "mps", None):        device = "cpu"    elif device == "mps" and not torch.backends.mps.is_available():        device = "cpu"    dtype = torch.float16 if device in ("cuda", "mps") else torch.float32    controlnet = ControlNetModel.from_pretrained(        CONTROLNET_ID,        torch_dtype=dtype,        use_auth_token=token    )    pipe = StableDiffusionControlNetPipeline.from_pretrained(        BASE_MODEL_ID,        controlnet=controlnet,        torch_dtype=dtype,        use_auth_token=token    ).to(device)    # Включаем xformers, если установлен    try:        pipe.enable_xformers_memory_efficient_attention()    except Exception as e:        logger.warning(f"xformers недоступен: {e}")    # Экономия памяти на CPU/MPS    if device != "cuda":        pipe.enable_attention_slicing()    return pipepipe  = init_pipeline()canny = CannyDetector()# ——— Хендлеры ———@dp.message(Command(commands=["start"]))async def cmd_start(message: types.Message):    await message.answer(        "👋 Пришлите мне рендер/фото —\n"        "я верну его с фотореалистичной обработкой, сохраняя геометрию."    )@dp.message(F.photo)async def photo_handler(message: types.Message):    # 1) Создаём сообщение-статус    status_msg = await message.answer("🔄 Обрабатываю… 0%")    # 2) Скачиваем изображение из Telegram    file_path = (await message.photo[-1].download()).name    img = Image.open(file_path).convert("RGB")    # 3) Генерируем карту Canny    control_map = canny(img)    # 4) Готовим callback для прогресса    loop = asyncio.get_event_loop()    def progress_callback(step: int, timestep, latents):        pct = int((step + 1) * 100 / NUM_STEPS)        loop.create_task(            status_msg.edit_text(f"🔄 Обрабатываю… {pct}%")        )    # 5) Запускаем пайплайн с ControlNet    output = pipe(        prompt=DEFAULT_PROMPT,        image=img,        control_image=control_map,        controlnet_conditioning_scale=COND_SCALE,        strength=STRENGTH,        num_inference_steps=NUM_STEPS,        guidance_scale=GUIDANCE_SCALE,        callback=progress_callback,        callback_steps=1,    ).images[0]    # 6) Сохраняем в байты и отправляем    bio = BytesIO()    output.save(bio, format="PNG")    bio.seek(0)    await message.reply_photo(photo=bio)    # 7) Финальный апдейт статуса    await status_msg.edit_text("✅ Готово!")# ——— Запуск бота ———if __name__ == "__main__":    logger.info("Бот запущен...")    asyncio.run(dp.start_polling(bot))
+import os
+import logging
+import asyncio
+from io import BytesIO
+
+from dotenv import load_dotenv
+from PIL import Image
+
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import FSInputFile
+
+import torch
+from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
+from controlnet_aux import CannyDetector
+
+
+load_dotenv(".dev")
+TELEGRAM_TOKEN    = os.getenv("TELEGRAM_TOKEN")
+
+HF_TOKEN          = os.getenv("HUGGINGFACE_TOKEN", None)
+
+BASE_MODEL_ID     = os.getenv("BASE_MODEL_ID")
+CONTROLNET_ID     = os.getenv("CONTROLNET_MODEL_ID")
+DEVICE            = os.getenv("DEVICE", "cuda")
+
+COND_SCALE        = float(os.getenv("CONDITIONING_SCALE", 1.2))
+STRENGTH          = float(os.getenv("STRENGTH", 0.28))
+GUIDANCE_SCALE    = float(os.getenv("GUIDANCE_SCALE", 7.5))
+NUM_STEPS         = int(os.getenv("NUM_STEPS", 24))
+
+DEFAULT_PROMPT    = os.getenv("DEFAULT_PROMPT", "photorealistic, high quality")
+
+# ——— Логирование ———
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ——— Инициализация бота и диспетчера ———
+bot = Bot(token=TELEGRAM_TOKEN)
+dp  = Dispatcher()
+
+# ——— Загрузка пайплайна Stable Diffusion + ControlNet ———
+def init_pipeline():
+    token = HF_TOKEN or None
+
+    # Определяем устройство и dtype
+    device = DEVICE
+    if device == "cuda" and not torch.cuda.is_available():
+        device = "cpu"
+    if device == "mps" and not getattr(torch.backends, "mps", None):
+        device = "cpu"
+    elif device == "mps" and not torch.backends.mps.is_available():
+        device = "cpu"
+
+    dtype = torch.float16 if device in ("cuda", "mps") else torch.float32
+
+    controlnet = ControlNetModel.from_pretrained(
+        CONTROLNET_ID,
+        torch_dtype=dtype,
+        use_auth_token=token
+    )
+    pipe = StableDiffusionControlNetPipeline.from_pretrained(
+        BASE_MODEL_ID,
+        controlnet=controlnet,
+        torch_dtype=dtype,
+        use_auth_token=token
+    ).to(device)
+
+    # Включаем xformers, если установлен
+    try:
+        pipe.enable_xformers_memory_efficient_attention()
+    except Exception as e:
+        logger.warning(f"xformers недоступен: {e}")
+
+    # Экономия памяти на CPU/MPS
+    if device != "cuda":
+        pipe.enable_attention_slicing()
+
+    return pipe
+
+pipe  = init_pipeline()
+canny = CannyDetector()
+
+# ——— Хендлеры ———
+@dp.message(Command(commands=["start"]))
+async def cmd_start(message: types.Message):
+    await message.answer(
+        "👋 Пришлите мне рендер/фото —\n"
+        "я верну его с фотореалистичной обработкой, сохраняя геометрию."
+    )
+
+@dp.message(F.photo)
+async def photo_handler(message: types.Message):
+    # 1) Создаём сообщение-статус
+    status_msg = await message.answer("🔄 Обрабатываю… 0%")
+    # 2) Скачиваем изображение из Telegram
+    file_path = (await message.photo[-1].download()).name
+    img = Image.open(file_path).convert("RGB")
+
+    # 3) Генерируем карту Canny
+    control_map = canny(img)
+
+    # 4) Готовим callback для прогресса
+    loop = asyncio.get_event_loop()
+    def progress_callback(step: int, timestep, latents):
+        pct = int((step + 1) * 100 / NUM_STEPS)
+        loop.create_task(
+            status_msg.edit_text(f"🔄 Обрабатываю… {pct}%")
+        )
+
+    # 5) Запускаем пайплайн с ControlNet
+    output = pipe(
+        prompt=DEFAULT_PROMPT,
+        image=img,
+        control_image=control_map,
+        controlnet_conditioning_scale=COND_SCALE,
+        strength=STRENGTH,
+        num_inference_steps=NUM_STEPS,
+        guidance_scale=GUIDANCE_SCALE,
+        callback=progress_callback,
+        callback_steps=1,
+    ).images[0]
+
+    # 6) Сохраняем в байты и отправляем
+    bio = BytesIO()
+    output.save(bio, format="PNG")
+    bio.seek(0)
+    await message.reply_photo(photo=bio)
+
+    # 7) Финальный апдейт статуса
+    await status_msg.edit_text("✅ Готово!")
+
+# ——— Запуск бота ———
+if __name__ == "__main__":
+    logger.info("Бот запущен...")
+    asyncio.run(dp.start_polling(bot))

@@ -1,12 +1,1 @@
-# Python__pycache__/*.py[cod].Pythonenv/venv/.venv/*.egg-info/.idea/.pytest_cache/.mypy_cache/.ruff_cache/.DS_Store.env.env
-.dev
-.idea/
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-.DS_Store
-.env
-.idea/
-
-.idea/
+# Python__pycache__/*.py[cod].Pythonenv/venv/.venv/*.egg-info/.idea/.pytest_cache/.mypy_cache/.ruff_cache/.DS_Store.env.env.dev.idea/__pycache__/*.py[cod].venv/venv/.DS_Store.env.idea/.idea/* text=auto eol=lf*.py text eol=lf*.sh text eol=lf*.txt text eol=lf*.env text eol=lf
